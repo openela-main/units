@@ -1,0 +1,152 @@
+From 9d1129f41f193a47d6791f44f14abe9479999266 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Wed, 8 Aug 2018 17:42:17 +0200
+Subject: [PATCH] units_cur: validate rate data from server
+
+---
+ units_cur | 72 ++++++++++++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 55 insertions(+), 17 deletions(-)
+
+diff --git a/units_cur b/units_cur
+index 00281d8..d625570 100755
+--- a/units_cur
++++ b/units_cur
+@@ -28,8 +28,12 @@ from __future__ import absolute_import, division, print_function
+ #
+ #
+ 
+-version = '4.2'
++version = '4.3'
+ 
++# Version 4.3: 20 July 2018
++#
++# Validate rate data from server
++#
+ # Version 4.2: 18 April 2018
+ #
+ # Handle case of empty/malformed entry returned from the server
+@@ -55,6 +59,10 @@ from sys import exit, stderr, stdout
+ 
+ outfile_name = 'currency.units'
+ 
++# valid metals 
++
++validmetals = ['silver','gold','platinum']
++
+ # This exchange rate table lists the currency ISO 4217 codes, their
+ # long text names, and any fixed definitions.  If the definition is
+ # empty then units_cur will query the server for a value.
+@@ -271,11 +279,19 @@ ap.add_argument('-v','--verbose',
+                 help='display details when fetching currency data',
+ )
+ 
++
++def validfloat(x):
++  try:
++    float(x)
++    return True
++  except ValueError:
++    return False
++
+ outfile_name = ap.parse_args().output_file
+ verbose = ap.parse_args().verbose
+ 
+ try:
+-  res = requests.get('http://finance.yahoo.com/webservice/v1/symbols'
++  res = requests.get('https://finance.yahoo.com/webservice/v1/symbols'
+                      '/allcurrencies/quote?format=json')
+   res.raise_for_status()
+   webdata = res.json()['list']['resources']
+@@ -299,10 +315,16 @@ for data in webdata:
+         stderr.write('Got unknown currency with code {}\n'.format(code))
+     else:
+       if not currency[code][rate_index]:
+-        currency[code][rate_index] = '1|{} US$'.format(rate)
++        if validfloat(rate):
++          currency[code][rate_index] = '1|{} US$'.format(rate)
++        else:
++          stderr.write('Got invalid rate "{}" for currency "{}"\n'.format(
++                                    rate, code))
+       elif verbose:
+-        stderr.write('Got value "{}" for currency "{}" but '
+-                     'it is already defined\n'.format(rate, code))
++        if currency[code][rate_index] != '1|{} US$'.format(rate):
++          stderr.write('Got value "{}" for currency "{}" but '
++                     'it is already defined as {}\n'.format(rate, code,
++                                                    currency[code][rate_index]))
+ 
+         
+ # Delete currencies where we have no rate data
+@@ -313,17 +335,15 @@ for code in currency.keys():
+     del currency[code]
+   
+ try:
+-  req = requests.get('http://services.packetizer.com/spotprices/?f=json')
++  req = requests.get('https://services.packetizer.com/spotprices/?f=json')
+   req.raise_for_status()
+   metals = req.json()
+ except requests.exceptions.RequestException as e:
+   stderr.write('Error connecting to spotprices server:\n{}\n'.format(e))
+   exit(1)
+ 
+-del metals['date']
+-
+ try:
+-  req = requests.get('http://services.packetizer.com/btc/?f=json')
++  req = requests.get('https://services.packetizer.com/btc/?f=json')
+   req.raise_for_status()
+   bitcoin = req.json()
+ except requests.exceptions.RequestException as e:
+@@ -344,13 +364,31 @@ ratestr = '\n'.join(
+     '{:{}}{}'.format(name, maxlen, rate) for (name, rate) in zip(cnames, crates)
+     )
+ 
+-ozzystr = '\n'.join('{:19}{} US$/troyounce'.format(
+-    metal + 'price',
+-    price,
+-    ) for metal, price in metals.items())
+-
+-bitcoinstr = '{:{}}{} US$ # From services.packetizer.com/btc\n'.format(
++metallist = ['']*len(validmetals)
++for metal, price in metals.items():
++  if metal in validmetals:
++    metalindex = validmetals.index(metal)
++    if validfloat(price):
++      if not metallist[metalindex]:
++        metallist[validmetals.index(metal)] = '{:19}{} US$/troyounce'.format(
++                                                         metal + 'price', price)
++      elif verbose:
++        stderr.write('Got value "{}" for metal "{}" but '
++                     'it is already defined\n'.format(price,metal))
++    else:
++      stderr.write('Got invalid rate "{}" for metal "{}"\n'.format(
++                                    price, metal))
++  elif metal != 'date' and verbose:  # Don't print a message for the "date" entry
++    stderr.write('Got unknown metal "{}" with value "{}"\n',metal,price)
++metalstr = '\n'.join(metallist)
++
++if validfloat(bitcoin['usd']):
++  bitcoinstr = '{:{}}{} US$ # From services.packetizer.com/btc\n'.format(
+                 'bitcoin',maxlen,bitcoin['usd'])
++else:
++  stderr.write('Got invalid bitcoin rate "{}"\n', bitcoint['usd'])
++  bitcointstr=''
++  
+ 
+ outstr = (
+ """# ISO Currency Codes
+@@ -366,9 +404,9 @@ outstr = (
+ 
+ # Precious metals prices from Packetizer (services.packetizer.com/spotprices)
+ 
+-{ozzystr}
++{metalstr}
+ 
+-""".format(codestr=codestr, datestr=datestr, ratestr=ratestr, ozzystr=ozzystr,
++""".format(codestr=codestr, datestr=datestr, ratestr=ratestr, metalstr=metalstr,
+            bitcoinstr=bitcoinstr)
+ ).replace('\n', linesep)
+ 
+-- 
+2.17.1
+
